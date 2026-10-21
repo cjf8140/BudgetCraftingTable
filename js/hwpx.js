@@ -375,8 +375,118 @@
     xml = growOuter(detailGrow.xml, detailGrow.delta + reasonGrow.delta);
     xml = centerSignatureRow(xml);
     xml = replaceSignNames(xml, data);
+    xml = attachReceipts(xml, data && data.receipts);
     xml = xml.replace(/(<hp:fieldBegin\b[^>]*?)\sdirty="0"/g, '$1 dirty="1"');
     return xml;
+  }
+
+  var RECEIPT_CELL_W = 47910;
+  var RECEIPT_CELL_H = 60000;
+
+  function receiptGrid(count) {
+    var cols = 2;
+    var rows = 2;
+    if (count <= 1) {
+      cols = 1;
+      rows = 1;
+    } else if (count === 2) {
+      cols = 1;
+      rows = 2;
+    } else if (count <= 4) {
+      cols = 2;
+      rows = 2;
+    } else if (count <= 6) {
+      cols = 2;
+      rows = 3;
+    } else if (count <= 8) {
+      cols = 2;
+      rows = 4;
+    } else {
+      cols = 3;
+      rows = Math.ceil(count / 3);
+    }
+    var gap = 280;
+    return {
+      cols: cols,
+      rows: rows,
+      gap: gap,
+      slotW: Math.floor((RECEIPT_CELL_W - gap * (cols - 1)) / cols),
+      slotH: Math.floor((RECEIPT_CELL_H - gap * (rows - 1)) / rows),
+    };
+  }
+
+  function placeReceipt(index, grid, pixelW, pixelH) {
+    var col = index % grid.cols;
+    var row = Math.floor(index / grid.cols);
+    var aspect = pixelW > 0 && pixelH > 0 ? pixelW / pixelH : 0.72;
+    var w = grid.slotW;
+    var h = Math.round(w / aspect);
+    if (h > grid.slotH) {
+      h = grid.slotH;
+      w = Math.max(1, Math.round(h * aspect));
+    }
+    return {
+      x: col * (grid.slotW + grid.gap) + Math.floor((grid.slotW - w) / 2),
+      y: row * (grid.slotH + grid.gap) + Math.floor((grid.slotH - h) / 2),
+      w: Math.max(1, w),
+      h: Math.max(1, h),
+    };
+  }
+
+  function receiptPicXml(index, box, pixelW, pixelH) {
+    var id = String(1610000000 + index);
+    var bin = "image" + (index + 3);
+    var dimW = Math.max(1, Math.round(pixelW || box.w) * 75);
+    var dimH = Math.max(1, Math.round(pixelH || box.h) * 75);
+    return (
+      '<hp:pic id="' + id + '" zOrder="' + (8 + index) + '" numberingType="PICTURE" textWrap="IN_FRONT_OF_TEXT" textFlow="BOTH_SIDES" lock="0" dropcapstyle="None" href="" groupLevel="0" instid="' + id + '" reverse="0">' +
+      '<hp:offset x="0" y="0"/>' +
+      '<hp:orgSz width="' + box.w + '" height="' + box.h + '"/>' +
+      '<hp:curSz width="' + box.w + '" height="' + box.h + '"/>' +
+      '<hp:flip horizontal="0" vertical="0"/>' +
+      '<hp:rotationInfo angle="0" centerX="' + Math.round(box.w / 2) + '" centerY="' + Math.round(box.h / 2) + '" rotateimage="1"/>' +
+      '<hp:renderingInfo><hc:transMatrix e1="1" e2="0" e3="0" e4="0" e5="1" e6="0"/><hc:scaMatrix e1="1" e2="0" e3="0" e4="0" e5="1" e6="0"/><hc:rotMatrix e1="1" e2="0" e3="0" e4="0" e5="1" e6="0"/></hp:renderingInfo>' +
+      '<hp:imgRect><hc:pt0 x="0" y="0"/><hc:pt1 x="' + box.w + '" y="0"/><hc:pt2 x="' + box.w + '" y="' + box.h + '"/><hc:pt3 x="0" y="' + box.h + '"/></hp:imgRect>' +
+      '<hp:imgClip left="0" right="' + dimW + '" top="0" bottom="' + dimH + '"/>' +
+      '<hp:inMargin left="0" right="0" top="0" bottom="0"/>' +
+      '<hp:imgDim dimwidth="' + dimW + '" dimheight="' + dimH + '"/>' +
+      '<hc:img binaryItemIDRef="' + bin + '" bright="0" contrast="0" effect="REAL_PIC" alpha="0"/>' +
+      "<hp:effects/>" +
+      '<hp:sz width="' + box.w + '" widthRelTo="ABSOLUTE" height="' + box.h + '" heightRelTo="ABSOLUTE" protect="0"/>' +
+      '<hp:pos treatAsChar="0" affectLSpacing="0" flowWithText="0" allowOverlap="1" holdAnchorAndSO="0" vertRelTo="PARA" horzRelTo="COLUMN" vertAlign="TOP" horzAlign="LEFT" vertOffset="' + box.y + '" horzOffset="' + box.x + '"/>' +
+      '<hp:outMargin left="0" right="0" top="0" bottom="0"/>' +
+      "</hp:pic>"
+    );
+  }
+
+  function attachReceipts(xml, receipts) {
+    var list = (receipts || []).filter(Boolean).slice(0, 8);
+    if (!list.length) return xml;
+    var grid = receiptGrid(list.length);
+    var pics = list.map(function (shot, index) {
+      var box = placeReceipt(index, grid, Number(shot.width) || 0, Number(shot.height) || 0);
+      if (box.y + box.h > RECEIPT_CELL_H || box.x + box.w > RECEIPT_CELL_W) {
+        throw new Error("영수증 이미지가 2쪽 칸을 벗어납니다.");
+      }
+      return receiptPicXml(index, box, Number(shot.width) || box.w, Number(shot.height) || box.h);
+    }).join("");
+    var marker = '<hp:run charPrIDRef="14"/>';
+    var at = xml.indexOf(marker);
+    if (at < 0 || xml.indexOf('rowAddr="3"', at) < 0 || xml.indexOf('rowAddr="3"', at) > at + 900) {
+      throw new Error("영수증 첨부 칸을 찾지 못했습니다.");
+    }
+    return xml.slice(0, at) + '<hp:run charPrIDRef="14">' + pics + "</hp:run>" + xml.slice(at + marker.length);
+  }
+
+  function receiptFileInfo(bytes, index) {
+    var view = bytes instanceof Uint8Array ? bytes : new Uint8Array(bytes || []);
+    var jpeg = view.length > 2 && view[0] === 255 && view[1] === 216;
+    var n = index + 3;
+    return {
+      id: "image" + n,
+      path: "BinData/image" + n + (jpeg ? ".jpg" : ".png"),
+      type: jpeg ? "image/jpeg" : "image/png",
+    };
   }
 
   function summarize(data) {
@@ -409,6 +519,15 @@
     var images = options && options.images;
     if (images && images.accountant) zip.file("BinData/image1.png", images.accountant);
     if (images && images.president) zip.file("BinData/image2.png", images.president);
+    var receipts = (data && data.receipts ? data.receipts : []).filter(function (shot) {
+      return shot && shot.bytes;
+    }).slice(0, 8);
+    var manifest = "";
+    for (var r = 0; r < receipts.length; r++) {
+      var info = receiptFileInfo(receipts[r].bytes, r);
+      zip.file(info.path, receipts[r].bytes);
+      manifest += '<opf:item id="' + info.id + '" href="' + info.path + '" media-type="' + info.type + '" isEmbeded="1"/>';
+    }
     var hpf = zip.file("Contents/content.hpf");
     if (hpf) {
       var meta = await hpf.async("string");
@@ -417,6 +536,7 @@
         /(<opf:meta name="ModifiedDate" content="text">)[^<]*/,
         "$1" + now
       );
+      if (manifest) meta = meta.replace("</opf:manifest>", manifest + "</opf:manifest>");
       zip.file("Contents/content.hpf", meta);
     }
     var mime = zip.file("mimetype");

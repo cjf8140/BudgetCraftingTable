@@ -69,6 +69,13 @@ test("예시 금액으로 품목 행과 누름틀을 채운다", async () => {
   assert.equal(xml.includes('<hp:t>고  승  주 (인)</hp:t><hp:pic id="1208551751"'), true);
   assert.equal(xml.includes('vertOffset="4294966702"'), true);
   assert.equal(xml.includes('horzOffset="5947"'), true);
+  assert.equal(xml.includes('vertOffset="73716"'), true);
+  assert.equal(xml.includes('horzOffset="48402"'), true);
+  assert.equal(xml.includes('width="4068"'), true);
+  assert.equal(xml.includes('height="1863"'), true);
+  assert.equal(xml.includes('width="8053"'), true);
+  assert.equal(xml.includes('height="3387"'), true);
+  assert.equal(xml.split('dimwidth="48000" dimheight="21000"').length - 1, 2);
   assert.equal(xml.includes('vertOffset="6218"'), false);
   assert.equal(xml.includes('horzOffset="43982"'), false);
   assert.equal(xml.includes("<hp:t>고  승  </hp:t><hp:pic"), false);
@@ -161,6 +168,43 @@ test("행이 칸보다 길어지면 지출 내역 칸을 늘린다", async () =>
   assert.equal(xml.includes("품목20"), true);
   assert.equal(xml.includes("20,000"), true);
   assert.equal(xml.includes("1개"), true);
+  assertXml(out);
+});
+
+test("영수증 이미지는 2쪽 칸 안에 들어간다", async () => {
+  const receipts = [];
+  for (let i = 0; i < 7; i++) {
+    receipts.push({ width: 900, height: 1400, bytes: Buffer.from("receipt-" + i) });
+  }
+  const buf = await H.buildHwpx(template, {
+    expectDate: "2026-10-21",
+    writeDate: "2026-10-21",
+    timing: "after",
+    items: [{ name: "얼음", price: "1000", qty: "1", unit: "EA" }],
+    receipts,
+  }, { type: "nodebuffer" });
+  const out = path.join(root, "test", "out", "out-receipt.hwpx");
+  fs.writeFileSync(out, buf);
+  const xml = readSection(out);
+  assert.equal(xml.includes('<hp:run charPrIDRef="14"><hp:pic'), true);
+  assert.equal(xml.includes('height="60000"'), true);
+  assert.equal(xml.includes('height="68375"'), true);
+  assert.equal(xml.includes('binaryItemIDRef="image9"'), true);
+  const pics = xml.split("<hp:pic ").slice(1);
+  let placed = 0;
+  for (const block of pics) {
+    if (!/binaryItemIDRef="image[3-9]"/.test(block)) continue;
+    const height = Number(block.match(/<hp:sz width="\d+" widthRelTo="ABSOLUTE" height="(\d+)"/)[1]);
+    const y = Number(block.match(/vertOffset="(\d+)"/)[1]);
+    const x = Number(block.match(/horzOffset="(\d+)"/)[1]);
+    const width = Number(block.match(/<hp:sz width="(\d+)"/)[1]);
+    assert.equal(y + height <= 60000, true);
+    assert.equal(x + width <= 47910, true);
+    placed += 1;
+  }
+  assert.equal(placed, 7);
+  assert.equal(zipHas(out, "BinData/image3.png"), true);
+  assert.equal(zipHas(out, "BinData/image9.png"), true);
   assertXml(out);
 });
 

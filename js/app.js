@@ -24,6 +24,10 @@
   var stampOverride = { accountant: null, president: null };
   var rootStamp = { accountant: null, president: null };
 
+  state.receipts = [];
+  var RECEIPT_WORKER = "https://budget-receipt.costanico1347.workers.dev";
+  var receiptList = document.querySelector("#receiptList");
+
   bindStaticFields();
   loadStampOverrides();
   renderItems();
@@ -64,14 +68,22 @@
 
   document.querySelector("#resetBtn").addEventListener("click", function () {
     if (!window.confirm("입력한 내용을 지울까요?")) return;
+    (state.receipts || []).forEach(function (shot) {
+      if (shot.url) URL.revokeObjectURL(shot.url);
+    });
     state = freshState();
+    state.receipts = [];
     syncStaticFields();
+    renderReceiptList();
     renderItems();
     updateComputed();
     save();
   });
 
   document.querySelector("#saveBtn").addEventListener("click", saveHwpx);
+  document.querySelector("#receiptInput").addEventListener("change", onReceiptPicked);
+  document.querySelector("#recognizeBtn").addEventListener("click", recognizeReceipts);
+  receiptList.addEventListener("click", onReceiptRemove);
 
   itemsBox.addEventListener("input", onItemInput);
   itemsBox.addEventListener("blur", onItemBlur, true);
@@ -188,7 +200,18 @@
   }
 
   function save() {
-    localStorage.setItem("budget-crafting-draft", JSON.stringify(state));
+    var copy = {
+      expectDate: state.expectDate,
+      writeDate: state.writeDate,
+      timing: state.timing,
+      subject: state.subject,
+      receiptCount: state.receiptCount,
+      reason: state.reason,
+      accountant: state.accountant,
+      president: state.president,
+      items: state.items,
+    };
+    localStorage.setItem("budget-crafting-draft", JSON.stringify(copy));
   }
 
   function bindStaticFields() {
@@ -284,15 +307,20 @@
     localStorage.setItem("budget-crafting-stamps", JSON.stringify(payload));
   }
 
+  var STAMP_W = 640;
+  var STAMP_H = 280;
+
   function readStampFile(file, role) {
     if (!file) return;
     var reader = new FileReader();
     reader.onload = function () {
-      stampOverride[role] = reader.result;
-      saveStampOverrides();
-      renderStampImages();
-      updateComputed();
-      setStatus((role === "accountant" ? "회계담당" : "학생회장") + " 도장을 이 브라우저에 저장했습니다.");
+      normalizeStamp(reader.result).then(function (buffer) {
+        stampOverride[role] = buffer;
+        saveStampOverrides();
+        renderStampImages();
+        updateComputed();
+        setStatus((role === "accountant" ? "회계담당" : "학생회장") + " 도장을 이 브라우저에 저장했습니다.");
+      });
     };
     reader.readAsArrayBuffer(file);
   }
@@ -312,13 +340,84 @@
   }
 
   async function loadStampFile(url) {
+    if (location.protocol === "file:") return null;
     try {
       var res = await fetch(url, { cache: "no-store" });
       if (!res.ok) return null;
-      return await res.arrayBuffer();
+      return await normalizeStamp(await res.arrayBuffer());
     } catch (err) {
       return null;
     }
+  }
+
+  function normalizeStamp(buffer) {
+    return new Promise(function (resolve) {
+      var blob = new Blob([buffer], { type: "image/png" });
+      var url = URL.createObjectURL(blob);
+      var img = new Image();
+      img.onload = function () {
+        URL.revokeObjectURL(url);
+        if (img.naturalWidth === STAMP_W && img.naturalHeight === STAMP_H) {
+          resolve(buffer);
+          return;
+        }
+        var src = document.createElement("canvas");
+        src.width = img.naturalWidth;
+        src.height = img.naturalHeight;
+        var sctx = src.getContext("2d");
+        sctx.drawImage(img, 0, 0);
+        var data = sctx.getImageData(0, 0, src.width, src.height).data;
+        var minx = src.width;
+        var miny = src.height;
+        var maxx = -1;
+        var maxy = -1;
+        for (var y = 0; y < src.height; y++) {
+          for (var x = 0; x < src.width; x++) {
+            var i = (y * src.width + x) * 4;
+            var a = data[i + 3];
+            if (a < 16) continue;
+            if (data[i] > 245 && data[i + 1] > 245 && data[i + 2] > 245) continue;
+            if (x < minx) minx = x;
+            if (y < miny) miny = y;
+            if (x > maxx) maxx = x;
+            if (y > maxy) maxy = y;
+          }
+        }
+        var canvas = document.createElement("canvas");
+        canvas.width = STAMP_W;
+        canvas.height = STAMP_H;
+        var ctx = canvas.getContext("2d");
+        var sx = 0;
+        var sy = 0;
+        var sw = src.width;
+        var sh = src.height;
+        if (maxx >= 0) {
+          sx = minx;
+          sy = miny;
+          sw = maxx - minx + 1;
+          sh = maxy - miny + 1;
+        }
+        var pad = 16;
+        var scale = Math.min((STAMP_W - pad * 2) / sw, (STAMP_H - pad * 2) / sh);
+        var dw = Math.max(1, Math.round(sw * scale));
+        var dh = Math.max(1, Math.round(sh * scale));
+        ctx.drawImage(src, sx, sy, sw, sh, (STAMP_W - dw) / 2, (STAMP_H - dh) / 2, dw, dh);
+        canvas.toBlob(function (out) {
+          if (!out) {
+            resolve(buffer);
+            return;
+          }
+          var reader = new FileReader();
+          reader.onload = function () { resolve(reader.result); };
+          reader.readAsArrayBuffer(out);
+        }, "image/png");
+      };
+      img.onerror = function () {
+        URL.revokeObjectURL(url);
+        resolve(buffer);
+      };
+      img.src = url;
+    });
   }
 
   function renderStampImages() {
@@ -560,6 +659,7 @@
       '&nbsp;&nbsp;(인)<img alt="" src="' +
       stampSrc("president") +
       '"></p>' +
+      receiptPreview() +
       '<table class="slip"><tr><th>지출항목</th><td>' +
       escapeHtml(state.subject || H.DEFAULTS.subject) +
       '</td></tr><tr><th>지출금액</th><td>\\ ' +
@@ -591,6 +691,7 @@
 
   async function loadTemplate() {
     try {
+      if (location.protocol === "file:") throw new Error("file");
       var res = await fetch("template/form.hwpx");
       if (!res.ok) throw new Error(String(res.status));
       templateBuffer = await res.arrayBuffer();
@@ -616,6 +717,175 @@
 
   function setStatus(text) {
     statusEl.textContent = text;
+  }
+
+  function receiptPreview() {
+    var shots = state.receipts || [];
+    if (!shots.length) return "";
+    return (
+      '<div class="shots"' + (shots.length <= 2 ? ' style="grid-template-columns:1fr"' : "") + ">" +
+      shots.map(function (shot) {
+        return '<img alt="" src="' + shot.url + '">';
+      }).join("") +
+      "</div>"
+    );
+  }
+
+  function renderReceiptList() {
+    var shots = state.receipts || [];
+    receiptList.innerHTML = shots.map(function (shot, index) {
+      return (
+        '<div class="receipt-thumb">' +
+        '<img alt="영수증 ' + (index + 1) + '" src="' + shot.url + '">' +
+        '<button type="button" class="ghost" data-receipt="' + index + '">×</button>' +
+        "</div>"
+      );
+    }).join("");
+  }
+
+  function onReceiptRemove(event) {
+    var button = event.target.closest("[data-receipt]");
+    if (!button) return;
+    var index = Number(button.dataset.receipt);
+    var shot = state.receipts[index];
+    if (shot && shot.url) URL.revokeObjectURL(shot.url);
+    state.receipts.splice(index, 1);
+    state.receiptCount = Math.max(1, state.receipts.length || 1);
+    syncStaticFields();
+    renderReceiptList();
+    updateComputed();
+  }
+
+  async function onReceiptPicked(event) {
+    var files = Array.prototype.slice.call(event.target.files || []);
+    event.target.value = "";
+    errorEl.textContent = "";
+    var room = 8 - state.receipts.length;
+    if (room <= 0) {
+      errorEl.textContent = "영수증은 한 페이지에 8장까지 넣습니다.";
+      return;
+    }
+    if (files.length > room) files = files.slice(0, room);
+    try {
+      for (var i = 0; i < files.length; i++) {
+        var shot = await prepareReceipt(files[i]);
+        shot.url = URL.createObjectURL(new Blob([shot.bytes], { type: shot.mime }));
+        state.receipts.push(shot);
+      }
+      state.receiptCount = state.receipts.length;
+      syncStaticFields();
+      renderReceiptList();
+      updateComputed();
+      setStatus("영수증 " + state.receipts.length + "장을 2쪽에 넣습니다.");
+    } catch (err) {
+      errorEl.textContent = err.message || String(err);
+    }
+  }
+
+  function prepareReceipt(file) {
+    return new Promise(function (resolve, reject) {
+      var url = URL.createObjectURL(file);
+      var img = new Image();
+      img.onload = function () {
+        var edge = Math.max(img.naturalWidth, img.naturalHeight) || 1;
+        var scale = Math.min(1, 1800 / edge);
+        var w = Math.max(1, Math.round(img.naturalWidth * scale));
+        var h = Math.max(1, Math.round(img.naturalHeight * scale));
+        var canvas = document.createElement("canvas");
+        canvas.width = w;
+        canvas.height = h;
+        var ctx = canvas.getContext("2d");
+        ctx.fillStyle = "#fff";
+        ctx.fillRect(0, 0, w, h);
+        ctx.drawImage(img, 0, 0, w, h);
+        URL.revokeObjectURL(url);
+        canvas.toBlob(function (blob) {
+          if (!blob) {
+            reject(new Error("영수증 이미지를 줄이지 못했습니다."));
+            return;
+          }
+          blob.arrayBuffer().then(function (bytes) {
+            resolve({ bytes: bytes, width: w, height: h, mime: "image/jpeg" });
+          }, reject);
+        }, "image/jpeg", 0.86);
+      };
+      img.onerror = function () {
+        URL.revokeObjectURL(url);
+        reject(new Error("영수증 이미지를 읽지 못했습니다."));
+      };
+      img.src = url;
+    });
+  }
+
+  function bufferToBase64(buffer) {
+    var bytes = new Uint8Array(buffer);
+    var parts = [];
+    var size = 0x8000;
+    for (var i = 0; i < bytes.length; i += size) {
+      parts.push(String.fromCharCode.apply(null, bytes.subarray(i, i + size)));
+    }
+    return btoa(parts.join(""));
+  }
+
+  async function recognizeReceipts() {
+    errorEl.textContent = "";
+    if (!state.receipts.length) {
+      errorEl.textContent = "영수증 이미지를 올려 주세요.";
+      return;
+    }
+    var button = document.querySelector("#recognizeBtn");
+    button.disabled = true;
+    setStatus("영수증을 읽는 중…");
+    try {
+      var images = [];
+      for (var i = 0; i < state.receipts.length; i++) {
+        images.push({ mime: state.receipts[i].mime, data: bufferToBase64(state.receipts[i].bytes) });
+      }
+      var res = await fetch(RECEIPT_WORKER, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ images: images }),
+      });
+      var payload = await res.json();
+      if (!res.ok || payload.error) throw new Error(payload.error || "영수증 인식에 실패했습니다.");
+      applyReceiptJson(payload);
+      renderItems();
+      updateComputed();
+      save();
+      setStatus((payload.vendor ? payload.vendor + " " : "") + "영수증에서 품목 " + (payload.items || []).length + "줄을 넣었습니다.");
+    } catch (err) {
+      errorEl.textContent = err.message || String(err);
+      setStatus("");
+    } finally {
+      button.disabled = false;
+    }
+  }
+
+  function applyReceiptJson(payload) {
+    var rows = [];
+    var items = Array.isArray(payload.items) ? payload.items : [];
+    for (var i = 0; i < items.length; i++) {
+      var name = String(items[i].name || "").replace(/\s+/g, " ").trim();
+      var qty = Math.max(1, Math.round(Number(items[i].qty) || 1));
+      var amount = Math.round(Number(items[i].amount) || 0);
+      if (!name || amount <= 0) continue;
+      var price = Math.round(amount / qty);
+      if (price * qty !== amount) {
+        price = amount;
+        qty = 1;
+      }
+      rows.push({ name: name, price: String(price), qty: String(qty), unit: "EA" });
+    }
+    var shipping = Math.max(0, Math.round(Number(payload.shipping) || 0));
+    var discount = Math.max(0, Math.round(Number(payload.discount) || 0));
+    var netShip = shipping - Math.min(shipping, discount);
+    if (netShip > 0) rows.push({ name: "배송비", price: String(netShip), qty: "1", unit: "EA" });
+    if (!rows.length) throw new Error("영수증에서 품목을 읽지 못했습니다.");
+    var feeAt = feeIndex();
+    if (feeAt >= 0) rows.push(state.items[feeAt]);
+    state.items = rows;
+    state.receiptCount = state.receipts.length || 1;
+    syncStaticFields();
   }
 
   async function saveHwpx() {
